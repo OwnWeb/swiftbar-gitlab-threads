@@ -14,7 +14,8 @@ trap 'rm -rf "$STATE_DIR"' EXIT
 cat > "$STATE_DIR/payload.json" <<JSON
 [{"group":"clients / acme","groupUrl":"g","project":"API","projectUrl":"p",
   "iid":"7","title":"Add retries","webUrl":"$MERGE_REQUEST_URL","lastNoteId":$LAST_NOTE_ID,
-  "threads":[{"author":"coderabbitai","url":"$MERGE_REQUEST_URL#note_$LAST_NOTE_ID","noteId":$LAST_NOTE_ID,"preview":"Guard the retry"}]}]
+  "lastActivityAt":"2026-01-02T10:00:00Z",
+  "threads":[{"author":"coderabbitai","url":"$MERGE_REQUEST_URL#note_$LAST_NOTE_ID","noteId":$LAST_NOTE_ID,"createdAt":"2026-01-02T10:00:00Z","preview":"Guard the retry"}]}]
 JSON
 
 # Piping into head would close the pipe under the plugin and trip pipefail.
@@ -42,3 +43,22 @@ assert_title "✓" "resolving a thread does not bring it back"
 
 "$PLUGIN" --unmark "$MERGE_REQUEST_URL"
 assert_title "🔀 1" "moving it back to the inbox restores it"
+
+cat > "$STATE_DIR/payload.json" <<'JSON'
+[{"group":"older","groupUrl":"g1","project":"One","projectUrl":"p1","iid":"1","title":"Older",
+  "webUrl":"https://x/mr/1","lastNoteId":1,"lastActivityAt":"2026-01-01T00:00:00Z",
+  "threads":[{"author":"bob","url":"https://x/mr/1#note_1","noteId":1,"createdAt":"2026-01-01T00:00:00Z","preview":"a"},
+             {"author":"bob","url":"https://x/mr/1#note_2","noteId":2,"createdAt":"2025-12-31T00:00:00Z","preview":"b"}]},
+ {"group":"newer","groupUrl":"g2","project":"Two","projectUrl":"p2","iid":"2","title":"Newer",
+  "webUrl":"https://x/mr/2","lastNoteId":3,"lastActivityAt":"2026-06-01T00:00:00Z",
+  "threads":[{"author":"bob","url":"https://x/mr/2#note_3","noteId":3,"createdAt":"2026-06-01T00:00:00Z","preview":"c"}]}]
+JSON
+
+# The group holding the most recent comment leads, even with fewer threads.
+groups=$(menu | grep 'size=13' | cut -d' ' -f1 | tr '\n' ' ')
+[ "$groups" = "newer older " ] || { echo "FAIL: groups are not sorted by recency (got '$groups')"; exit 1; }
+echo "ok: groups lead with the most recent comment"
+
+threads=$(menu | grep -c '^-- bob:')
+[ "$threads" = 3 ] || { echo "FAIL: expected 3 thread lines, got $threads"; exit 1; }
+echo "ok: every thread is listed"

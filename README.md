@@ -28,7 +28,9 @@ Refresh now
 
 The menu bar shows how many merge requests need attention. The dropdown groups
 them by GitLab group and project, and each merge request expands into its
-unresolved threads, previewed and linked to the exact comment anchor.
+unresolved threads, previewed and linked to the exact comment anchor. Groups,
+projects, merge requests and threads all lead with the most recent comment, so
+what moved last sits at the top.
 
 ## Install
 

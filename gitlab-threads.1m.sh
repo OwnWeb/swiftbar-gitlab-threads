@@ -54,7 +54,7 @@ query {
           nodes {
             resolvable
             resolved
-            notes { nodes { url body author { username } } }
+            notes { nodes { url body createdAt author { username } } }
           }
         }
       }
@@ -117,6 +117,7 @@ fetch_payload() {
            author: $notes[-1].author.username,
            url: ($notes[-1].url // $notes[0].url),
            noteId: ($notes[-1].url | note_id),
+           createdAt: $notes[-1].createdAt,
            preview: preview($notes),
          }];
 
@@ -139,7 +140,8 @@ fetch_payload() {
          # it, which is what brings the merge request back into the menu, while
          # resolving a thread only lowers it.
          lastNoteId: ([.pending[].noteId] | max),
-         threads: .pending,
+         lastActivityAt: ([.pending[].createdAt] | max),
+         threads: (.pending | sort_by(.createdAt) | reverse),
        }]
   ' <<<"$response"
 }
@@ -167,15 +169,27 @@ render_menu() {
 
       # The seen list repeats the same tree one level deeper, so indentation is
       # a parameter: $indent carries the structure lines, $child the threads.
+      # ISO-8601 timestamps sort lexicographically, so the most recent comment
+      # bubbles its merge request, project and group to the top.
+      def by_recency: sort_by(.lastActivityAt) | reverse;
+
       def tree($indent; $child):
         group_by(.group)
         | map({
             name: .[0].group,
             url: .[0].groupUrl,
             total: ([.[].threads[]] | length),
-            projects: (group_by(.project) | map({ name: .[0].project, url: .[0].projectUrl, merge_requests: . })),
+            lastActivityAt: ([.[].lastActivityAt] | max),
+            projects: (group_by(.project)
+                       | map({
+                           name: .[0].project,
+                           url: .[0].projectUrl,
+                           lastActivityAt: ([.[].lastActivityAt] | max),
+                           merge_requests: by_recency,
+                         })
+                       | by_recency),
           })
-        | sort_by(-.total)
+        | by_recency
         | .[]
         | (if $indent == "" then "---" else empty end),
           "\($indent)\(.name)  (\(.total)) | href=\(.url) size=13",
