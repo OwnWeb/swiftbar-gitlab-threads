@@ -21,8 +21,12 @@ readonly DASHBOARD_URL="https://$GITLAB_HOST/dashboard/merge_requests"
 # and extension, so renaming the file keeps the self-refresh working.
 plugin_file=$(basename "$0")
 readonly PLUGIN_NAME="${plugin_file%%.*}"
-readonly STATE_DIR="$HOME/.cache/swiftbar-gitlab-threads"
-readonly CACHE_FILE="$STATE_DIR/menu"
+# Menu actions re-invoke the script, which SwiftBar runs from an arbitrary
+# working directory.
+readonly SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$plugin_file"
+readonly STATE_DIR="${STATE_DIR:-$HOME/.cache/swiftbar-gitlab-threads}"
+readonly PAYLOAD_FILE="$STATE_DIR/payload.json"
+readonly SEEN_FILE="$STATE_DIR/seen.json"
 readonly ERROR_FILE="$STATE_DIR/error"
 readonly CACHE_MAX_AGE_SECONDS=30
 readonly RETRY_ATTEMPTS=2
@@ -59,7 +63,7 @@ query {
 }
 GRAPHQL
 
-build_menu() {
+fetch_payload() {
   local response attempt
 
   for attempt in $(seq "$RETRY_ATTEMPTS"); do
@@ -72,9 +76,7 @@ build_menu() {
     return 1
   fi
 
-  jq -r \
-    --arg bot "$BOT_AUTHOR" \
-    --arg dashboard "$DASHBOARD_URL" \
+  jq \
     --argjson titleMax "$TITLE_MAX_CHARS" \
     --argjson previewMax "$PREVIEW_MAX_CHARS" '
 
@@ -105,6 +107,8 @@ build_menu() {
       | (if ($latest | length) > 10 then $notes[-1] else $notes[0] end) as $source
       | ($source.body | severity) + ($source.body | body_lines | strip_markup | truncate($previewMax));
 
+    def note_id: capture("#note_(?<id>[0-9]+)").id | tonumber;
+
     def pending_threads:
       [.discussions.nodes[]
        | select(.resolvable and (.resolved | not))
@@ -112,6 +116,7 @@ build_menu() {
        | {
            author: $notes[-1].author.username,
            url: ($notes[-1].url // $notes[0].url),
+           noteId: ($notes[-1].url | note_id),
            preview: preview($notes),
          }];
 
@@ -130,36 +135,70 @@ build_menu() {
          iid: .iid,
          title: (.title | strip_markup | truncate($titleMax)),
          webUrl: .webUrl,
-         pending: .pending,
-       }]                                                                    as $merge_requests
-    | ([$merge_requests[].pending[].author] | map(select(. == $bot)) | length)   as $bot_count
-    | ([$merge_requests[].pending[].author] | map(select(. != $bot)) | length)   as $human_count
-    | ($merge_requests
-       | group_by(.group)
-       | map({
-           name: .[0].group,
-           url: .[0].groupUrl,
-           total: ([.[].pending[]] | length),
-           projects: (group_by(.project) | map({ name: .[0].project, url: .[0].projectUrl, merge_requests: . })),
-         })
-       | sort_by(-.total))                                                      as $groups
-
-    | if ($bot_count + $human_count) == 0 then
-        "✓"
-      else
-        "🔀 \($merge_requests | length)",
-        "---",
-        "🐰 \($bot_count)  ·  👤 \($human_count) | href=\($dashboard) size=12",
-        ($groups[]
-         | "---",
-           "\(.name)  (\(.total)) | href=\(.url) size=13",
-           (.projects[]
-            | "  \(.name) | href=\(.url) size=12 color=#888888",
-              (.merge_requests[]
-               | "  !\(.iid) (\(.pending | length)) \(.title) | href=\(.webUrl)",
-                 (.pending[] | "-- \(.author): \(.preview) | href=\(.url)"))))
-      end
+         # Marking a merge request seen records this id. A later comment raises
+         # it, which is what brings the merge request back into the menu, while
+         # resolving a thread only lowers it.
+         lastNoteId: ([.pending[].noteId] | max),
+         threads: .pending,
+       }]
   ' <<<"$response"
+}
+
+render_menu() {
+  jq -r \
+    --arg bot "$BOT_AUTHOR" \
+    --arg dashboard "$DASHBOARD_URL" \
+    --arg script "$SCRIPT_PATH" \
+    --slurpfile seenFile "$SEEN_FILE" '
+
+    ($seenFile[0] // {}) as $seen
+    | map(. + { seen: (($seen[.webUrl] // 0) >= .lastNoteId) })                as $all
+    | ($all | map(select(.seen | not)))                                        as $inbox
+    | ($all | map(select(.seen)))                                              as $archive
+    | ([$inbox[].threads[].author] | map(select(. == $bot)) | length)          as $bot_count
+    | ([$inbox[].threads[].author] | map(select(. != $bot)) | length)          as $human_count
+
+    | def mark_action($mr): "bash=\"\($script)\" param1=--mark param2=\($mr.webUrl) param3=\($mr.lastNoteId) terminal=false refresh=true";
+      def unmark_action($mr): "bash=\"\($script)\" param1=--unmark param2=\($mr.webUrl) terminal=false refresh=true";
+
+      def groups($merge_requests):
+        $merge_requests
+        | group_by(.group)
+        | map({
+            name: .[0].group,
+            url: .[0].groupUrl,
+            total: ([.[].threads[]] | length),
+            projects: (group_by(.project) | map({ name: .[0].project, url: .[0].projectUrl, merge_requests: . })),
+          })
+        | sort_by(-.total);
+
+      (if ($inbox | length) == 0 then "✓" else "🔀 \($inbox | length)" end),
+      "---",
+      (if ($inbox | length) > 0 then
+         "🐰 \($bot_count)  ·  👤 \($human_count) | href=\($dashboard) size=12",
+         (groups($inbox)[]
+          | "---",
+            "\(.name)  (\(.total)) | href=\(.url) size=13",
+            (.projects[]
+             | "  \(.name) | href=\(.url) size=12 color=#888888",
+               (.merge_requests[]
+                | "  !\(.iid) (\(.threads | length)) \(.title) | href=\(.webUrl)",
+                  (.threads[] | "-- \(.author): \(.preview) | href=\(.url)"),
+                  "-- ---",
+                  "-- ✓ Mark as seen | \(mark_action(.))")))
+       else
+         "No unresolved threads | size=12 color=#888888"
+       end),
+      (if ($archive | length) > 0 then
+         "---",
+         "👁 Seen (\($archive | length)) | size=12",
+         ($archive[]
+          | "-- !\(.iid) \(.title) | href=\(.webUrl)",
+            "-- -- \(.threads | length) threads · \(.project) | size=12 color=#888888",
+            "-- -- ---",
+            "-- -- ↩︎ Move back to inbox | \(unmark_action(.))")
+       else empty end)
+  ' "$PAYLOAD_FILE"
 }
 
 file_age_seconds() {
@@ -183,39 +222,63 @@ format_age() {
 print_status() {
   echo "---"
 
-  if [ -f "$CACHE_FILE" ]; then
-    echo "Last check at $(date -r "$CACHE_FILE" +%H:%M:%S) ($(format_age "$(file_age_seconds "$CACHE_FILE")")) | size=12 color=#888888"
+  if [ -f "$PAYLOAD_FILE" ]; then
+    echo "Last check at $(date -r "$PAYLOAD_FILE" +%H:%M:%S) ($(format_age "$(file_age_seconds "$PAYLOAD_FILE")")) | size=12 color=#888888"
   fi
 
   if [ -f "$ERROR_FILE" ]; then
     echo "⚠️ Failed at $(date -r "$ERROR_FILE" +%H:%M:%S): $(tr -d '\n' < "$ERROR_FILE") | size=12 color=red"
   fi
 
-  echo "Refresh now | bash=\"$0\" param1=--fetch terminal=false size=12"
+  echo "Refresh now | bash=\"$SCRIPT_PATH\" param1=--fetch terminal=false size=12"
 }
 
-# Refreshing the plugin re-runs this script, which would fetch again and loop
-# forever. The freshness check breaks that: the rerun finds a young cache.
+update_seen() {
+  local filter=$1 url=$2 note_id=${3:-0}
+
+  jq --arg url "$url" --argjson noteId "$note_id" "$filter" "$SEEN_FILE" > "$SEEN_FILE.tmp" \
+    && mv "$SEEN_FILE.tmp" "$SEEN_FILE"
+}
+
 mkdir -p "$STATE_DIR"
+[ -f "$SEEN_FILE" ] || echo '{}' > "$SEEN_FILE"
 
-if [ "$1" = "--fetch" ]; then
-  if menu=$(build_menu); then
-    printf '%s\n' "$menu" > "$CACHE_FILE.tmp" && mv "$CACHE_FILE.tmp" "$CACHE_FILE"
-    rm -f "$ERROR_FILE"
-  else
-    # The cache keeps the last known state: a failed check must not blank the menu.
-    printf '%s' "$menu" > "$ERROR_FILE"
-  fi
-  open -g "swiftbar://refreshplugin?name=$PLUGIN_NAME"
-  exit 0
-fi
+case "$1" in
+  --fetch)
+    # Refreshing the plugin re-runs this script, which would fetch again and
+    # loop forever. The freshness check breaks that: the rerun finds a young
+    # payload.
+    if payload=$(fetch_payload); then
+      printf '%s\n' "$payload" > "$PAYLOAD_FILE.tmp" && mv "$PAYLOAD_FILE.tmp" "$PAYLOAD_FILE"
+      rm -f "$ERROR_FILE"
+      # Merge requests that dropped out of the payload would otherwise keep
+      # their entry forever.
+      jq --slurpfile payload "$PAYLOAD_FILE" \
+        'with_entries(select(.key as $url | $payload[0] | map(.webUrl) | index($url)))' \
+        "$SEEN_FILE" > "$SEEN_FILE.tmp" && mv "$SEEN_FILE.tmp" "$SEEN_FILE"
+    else
+      # The payload keeps the last known state: a failed check must not blank
+      # the menu.
+      printf '%s' "$payload" > "$ERROR_FILE"
+    fi
+    open -g "swiftbar://refreshplugin?name=$PLUGIN_NAME"
+    exit 0
+    ;;
+  --mark)
+    update_seen '.[$url] = $noteId' "$2" "$3"
+    exit 0
+    ;;
+  --unmark)
+    update_seen 'del(.[$url])' "$2"
+    exit 0
+    ;;
+esac
 
-if [ -s "$CACHE_FILE" ]; then
+if [ -s "$PAYLOAD_FILE" ]; then
   if [ -f "$ERROR_FILE" ]; then
-    head -1 "$CACHE_FILE" | sed 's/$/ ⚠️/'
-    tail -n +2 "$CACHE_FILE"
+    render_menu | sed '1s/$/ ⚠️/'
   else
-    cat "$CACHE_FILE"
+    render_menu
   fi
 else
   [ -f "$ERROR_FILE" ] && echo "⚠️" || echo "⏳"
@@ -223,7 +286,7 @@ fi
 
 print_status
 
-cache_age=$(file_age_seconds "$CACHE_FILE") || cache_age=$(( CACHE_MAX_AGE_SECONDS + 1 ))
-if [ "$cache_age" -gt "$CACHE_MAX_AGE_SECONDS" ]; then
+payload_age=$(file_age_seconds "$PAYLOAD_FILE") || payload_age=$(( CACHE_MAX_AGE_SECONDS + 1 ))
+if [ "$payload_age" -gt "$CACHE_MAX_AGE_SECONDS" ]; then
   nohup "$0" --fetch >/dev/null 2>&1 &
 fi

@@ -59,6 +59,16 @@ echo 'GITLAB_HOST=gitlab.example.com' > ~/.config/swiftbar-gitlab-threads.conf
 
 The config file is sourced by the plugin, so environment variables work too.
 
+## Marking merge requests as seen
+
+Open a merge request's submenu and pick **Mark as seen**: it leaves the menu bar
+count and moves to the **Seen** submenu at the bottom, where you can send it
+back to the inbox at any time.
+
+Marking records the id of the newest note on the merge request. A later comment
+carries a higher id, which is what brings the merge request back on its own.
+Resolving a thread only lowers that id, so it does not resurface.
+
 ## How it works
 
 `glab` runs one GraphQL query for your open merge requests and their
@@ -76,6 +86,10 @@ cause.
 
 macOS, [SwiftBar](https://github.com/swiftbar/SwiftBar),
 [glab](https://gitlab.com/gitlab-org/cli), jq.
+
+## Tests
+
+`./test.sh` exercises the seen rule against a fixed payload, no network needed.
 
 ## License
 
