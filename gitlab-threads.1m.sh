@@ -196,9 +196,8 @@ render_menu() {
          "👁 Seen (\($archive | length)) | refresh=true size=12",
          ($archive[]
           | "-- !\(.iid) \(.title) | href=\(.webUrl)",
-            "-- -- \(.threads | length) threads · \(.project) | size=12 color=#888888",
-            "-- -- ---",
-            "-- -- ↩︎ Move back to inbox | \(unmark_action(.))")
+            "---- \(.threads | length) threads · \(.project) | size=12 color=#888888",
+            "---- ↩︎ Move back to inbox | \(unmark_action(.))")
        else empty end)
   ' "$PAYLOAD_FILE"
 }
