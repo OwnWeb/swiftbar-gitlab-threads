@@ -191,7 +191,9 @@ render_menu() {
        end),
       (if ($archive | length) > 0 then
          "---",
-         "👁 Seen (\($archive | length)) | size=12",
+         # A menu item without an action is disabled by macOS, which also
+         # blocks its submenu from opening.
+         "👁 Seen (\($archive | length)) | refresh=true size=12",
          ($archive[]
           | "-- !\(.iid) \(.title) | href=\(.webUrl)",
             "-- -- \(.threads | length) threads · \(.project) | size=12 color=#888888",
