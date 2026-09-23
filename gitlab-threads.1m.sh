@@ -158,34 +158,39 @@ render_menu() {
     | ([$inbox[].threads[].author] | map(select(. == $bot)) | length)          as $bot_count
     | ([$inbox[].threads[].author] | map(select(. != $bot)) | length)          as $human_count
 
-    | def mark_action($mr): "bash=\"\($script)\" param1=--mark param2=\($mr.webUrl) param3=\($mr.lastNoteId) terminal=false refresh=true";
-      def unmark_action($mr): "bash=\"\($script)\" param1=--unmark param2=\($mr.webUrl) terminal=false refresh=true";
+    | def action_line:
+        if .seen then
+          "↩︎ Move back to inbox | bash=\"\($script)\" param1=--unmark param2=\(.webUrl) terminal=false refresh=true"
+        else
+          "✓ Mark as seen | bash=\"\($script)\" param1=--mark param2=\(.webUrl) param3=\(.lastNoteId) terminal=false refresh=true"
+        end;
 
-      def groups($merge_requests):
-        $merge_requests
-        | group_by(.group)
+      # The seen list repeats the same tree one level deeper, so indentation is
+      # a parameter: $indent carries the structure lines, $child the threads.
+      def tree($indent; $child):
+        group_by(.group)
         | map({
             name: .[0].group,
             url: .[0].groupUrl,
             total: ([.[].threads[]] | length),
             projects: (group_by(.project) | map({ name: .[0].project, url: .[0].projectUrl, merge_requests: . })),
           })
-        | sort_by(-.total);
+        | sort_by(-.total)
+        | .[]
+        | (if $indent == "" then "---" else empty end),
+          "\($indent)\(.name)  (\(.total)) | href=\(.url) size=13",
+          (.projects[]
+           | "\($indent)  \(.name) | href=\(.url) size=12 color=#888888",
+             (.merge_requests[]
+              | "\($indent)  !\(.iid) (\(.threads | length)) \(.title) | href=\(.webUrl)",
+                "\($child)\(action_line)",
+                (.threads[] | "\($child)\(.author): \(.preview) | href=\(.url)")));
 
       (if ($inbox | length) == 0 then "✓" else "🔀 \($inbox | length)" end),
       "---",
       (if ($inbox | length) > 0 then
          "🐰 \($bot_count)  ·  👤 \($human_count) | href=\($dashboard) size=12",
-         (groups($inbox)[]
-          | "---",
-            "\(.name)  (\(.total)) | href=\(.url) size=13",
-            (.projects[]
-             | "  \(.name) | href=\(.url) size=12 color=#888888",
-               (.merge_requests[]
-                | "  !\(.iid) (\(.threads | length)) \(.title) | href=\(.webUrl)",
-                  (.threads[] | "-- \(.author): \(.preview) | href=\(.url)"),
-                  "-- ---",
-                  "-- ✓ Mark as seen | \(mark_action(.))")))
+         ($inbox | tree(""; "-- "))
        else
          "No unresolved threads | size=12 color=#888888"
        end),
@@ -194,10 +199,7 @@ render_menu() {
          # A menu item without an action is disabled by macOS, which also
          # blocks its submenu from opening.
          "👁 Seen (\($archive | length)) | refresh=true size=12",
-         ($archive[]
-          | "-- !\(.iid) \(.title) | href=\(.webUrl)",
-            "---- \(.threads | length) threads · \(.project) | size=12 color=#888888",
-            "---- ↩︎ Move back to inbox | \(unmark_action(.))")
+         ($archive | tree("-- "; "---- "))
        else empty end)
   ' "$PAYLOAD_FILE"
 }
